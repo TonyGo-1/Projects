@@ -1,0 +1,183 @@
+---
+title: "Logistic Regression of NHANES data"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+There are 6358 Females and 5575 Males. The Mean Age is around 38.3 (F:39.4 & M:37.1). 84.3% (10058) of participants are born in the US, while 15.7% (1875) of participants are born somewhere else.
+```{r pressure, echo=FALSE}
+#Load in our data and some packages
+library(dplyr)
+library(ggplot2)
+library(car)
+library(MASS)
+library(mice)
+library(ResourceSelection)
+library(table1)
+library(knitr)
+
+MasterData<-read.csv("MasterData.csv")
+
+table1(~Age+Country_of_Birth|Gender,data=MasterData)->sTABLE
+sTABLE
+```
+Here we conduct a Univariate Analysis. The p-value is being rounded up to the 4th decimal point. Active Duty is the only Categorical Variable that is not significant at a p-value of 0.9648. At a p-value of 0.05, White Blood Cell Count was borderline, so it was kept. Lymphocyte Percent was removed.
+
+```{r, echo=FALSE}
+predictors<-c("Gender","Race","Active_Duty","Country_of_Birth","Weightkg","StandingHeightcm","BMI","Age","People_in_Household","DirectHDLCholesterol_mgdL","HD2HD3","HD2","HD3","epiHD3","WhiteBloodCellCount","LymphocytePercent","MonocytePercent","Segmented_neutrophilsPercent","EosinophilsPercent","BasophilsPercent","RedBloodCellCount",
+"PlateletCount","Hemoglobin")
+
+yvar<-"High_Chol"
+
+p_values <- sapply(predictors, function(predictor) {
+  x <- as.formula(paste(yvar, "~", predictor))
+  model <- glm(x, data = MasterData, family = binomial)
+  summary(model)$coefficients[2,4]
+})
+
+#p-values are converted into a dataframe
+p_values_df <- data.frame(P_Value = p_values)
+
+kable(p_values_df, col.names = c("P-value"), digits = 4)
+```
+We now check for Multicollinearity. Looking at the results below, it seems HD3 has the highest VIF, so we'll see what happens when we remove it from the model.
+```{r, echo=FALSE}
+full_model<-glm(High_Chol ~ Weightkg+StandingHeightcm+
+                    BMI+Gender+Age+Race+ 
+                    Country_of_Birth+People_in_Household+
+                    DirectHDLCholesterol_mgdL+
+                    HD2HD3+HD2+HD3+epiHD3+WhiteBloodCellCount+
+                    MonocytePercent+
+                    Segmented_neutrophilsPercent+EosinophilsPercent+
+                    BasophilsPercent+RedBloodCellCount+
+                    PlateletCount+Hemoglobin,data=MasterData,family=binomial)
+vif(full_model)
+```
+
+Results after HD3 was removed from the model.
+```{r, echo=FALSE}
+model <- glm(High_Chol ~ Weightkg + StandingHeightcm +
+                    BMI + Gender + Age + Race+ 
+                    Country_of_Birth + People_in_Household +
+                    DirectHDLCholesterol_mgdL+HD2HD3+HD2+epiHD3+WhiteBloodCellCount+
+                    MonocytePercent+
+                    Segmented_neutrophilsPercent+EosinophilsPercent+
+                    BasophilsPercent+RedBloodCellCount+
+                    PlateletCount+Hemoglobin, data=MasterData, family = binomial)
+vif(model)
+```
+
+That seemed to have fixed most of VIFS. Let's remove the next highest VIF, which is Weightkg to see what happens.
+```{r, echo=FALSE}
+model <- glm(High_Chol ~ StandingHeightcm +
+               BMI + Gender + Age + Race+ 
+               Country_of_Birth + People_in_Household +
+               DirectHDLCholesterol_mgdL+HD2HD3+HD2+epiHD3+WhiteBloodCellCount+
+               MonocytePercent+
+               Segmented_neutrophilsPercent+EosinophilsPercent+
+               BasophilsPercent+RedBloodCellCount+
+               PlateletCount+Hemoglobin, data=MasterData, family = binomial)
+vif(model)
+```
+
+The VIF is below 10 for all predictors so we can move on to fulfilling the other Regression Assumptions. Independence will be assumed. Lets now check for Outliers and Influential Points. I listed the Cooks Distance and Leverage for every participant in decreasing order, meaning the highest Cook's Distance and Leverage are at the top of the list. Below are the results of the highest 10 Cook's Distance and Leverages. As we can see the higest value for both are below 1 (A very small value). We can reasonably infer that there are no outliers or influential points to worry about.
+
+```{r, echo=FALSE}
+#Calculate Cook's Distance and Leverage
+cooks_dist<-cooks.distance(model)
+leverage<-hatvalues(model)
+
+#Combine results into a data frame
+influence_table<-data.frame(
+  Observation=1:length(cooks_dist), 
+  Cook_Distance=cooks_dist,         
+  Leverage=leverage                 
+)
+
+#Labeled it decreasing order.
+influence_table<-influence_table[order(-influence_table$Cook_Distance), ]
+
+#influence_table
+head(influence_table,10)
+```
+
+To test the linearity assumption, we will use a Box-Tidwell Test. The loop below creates an interaction term for every continuous variable in the list above, as well as a logit. A model is fit with every model with the interaction term and a p-value is extracted for each interaction term. The below method is a bit crude, but the p-value for each interaction term is pasted into a table. bt is a table of the p-values for the interaction terms.
+
+Age,DirectHDLCholesterol_mgdL,HD2,epiHD3,EosinophilsPercent,BasophilsPercent,PlateletCount are significant at an alpha level of 0.05. StandingHeightcm,HD2HD3,Segmented_neutrophilsPercent are borderline. BMI,People_in_Household,WhiteBloodCellCount,MonocytePercent,RedBloodCellCount and Hemoglobin are not significant.
+
+
+```{r, echo=FALSE}
+bt_results <- data.frame(Variable=character(),P_Value=numeric(),stringsAsFactors=FALSE)
+
+continuous_vars <- c("StandingHeightcm", "BMI", "Age", 
+                     "People_in_Household", "DirectHDLCholesterol_mgdL", "HD2HD3",
+                     "HD2", "epiHD3", "WhiteBloodCellCount", 
+                     "MonocytePercent", "Segmented_neutrophilsPercent",
+                     "EosinophilsPercent", "BasophilsPercent", 
+                     "RedBloodCellCount", "PlateletCount", "Hemoglobin")
+
+for (var in continuous_vars) {
+  MasterData[[paste0("log_", var)]] <- log(MasterData[[var]] + 1)
+  MasterData[[paste0("interaction_", var)]] <- MasterData[[var]] * MasterData[[paste0("log_", var)]]
+  formula<-as.formula(paste("High_Chol ~", var, "+ log_", var, "+ interaction_", var, 
+                              "+ Gender + Age + Race + Country_of_Birth + People_in_Household + 
+                                DirectHDLCholesterol_mgdL + HD2 + HD3 + epiHD3 + 
+                                WhiteBloodCellCount + LymphocytePercent + 
+                                MonocytePercent + EosinophilsPercent + 
+                                BasophilsPercent + RedBloodCellCount + 
+                                PlateletCount + Hemoglobin", sep = ""))
+  bt_model<-glm(formula,data=MasterData,family=binomial)
+  p_value<-summary(bt_model)$coefficients[paste0("interaction_", var), "Pr(>|z|)"]
+  bt_results<-rbind(bt_results, data.frame(Variable=var,P_Value=p_value))
+}
+
+print(bt_results)
+```
+
+We'll transform the significant variables and perform a Logistic Regression Analysis on the transformed variables. This is the full model of the transformed variables.
+```{r, echo=FALSE}
+MasterData$log_Age<-log(MasterData$Age + 1)
+MasterData$log_DirectHDLCholesterol_mgdL<-log(MasterData$DirectHDLCholesterol_mgdL + 1)
+MasterData$log_HD2<-log(MasterData$HD2+1)
+MasterData$log_epiHD3<-log(MasterData$epiHD3+1)
+MasterData$log_EosinophilsPercent<-log(MasterData$EosinophilsPercent + 1)
+MasterData$log_BasophilsPercent<-log(MasterData$BasophilsPercent + 1)
+MasterData$log_PlateletCount<-log(MasterData$PlateletCount + 1)
+MasterData$log_StandingHeightcm<-log(MasterData$StandingHeightcm + 1)
+MasterData$log_HD2HD3<-log(MasterData$HD2HD3 + 1)
+MasterData$log_Segmented_neutrophilsPercent<-log(MasterData$Segmented_neutrophilsPercent+1)
+
+model_transformed <- glm(High_Chol ~ log_StandingHeightcm+BMI+Gender+log_Age
+                         +Race+Country_of_Birth+People_in_Household+log_DirectHDLCholesterol_mgdL
+                         +log_HD2HD3+log_HD2+log_epiHD3+WhiteBloodCellCount+MonocytePercent+
+                           log_Segmented_neutrophilsPercent+
+                           log_EosinophilsPercent + log_BasophilsPercent + RedBloodCellCount+
+                           log_PlateletCount + Hemoglobin
+                           , data = MasterData, family = binomial)
+
+summary(model_transformed)
+```
+Just to be safe, we'll recheck the vif. It seems everything is still in order and we don't have to worry about multicollinearity. 
+```{r, echo=FALSE}
+vif(model_transformed)
+```
+
+We'll use a stepwise approach to pick the variables that fit a decent model that can predict high cholesterol.
+```{r, echo=FALSE}
+stepwise_model<-step(model_transformed, direction = "both", trace = TRUE)
+summary(stepwise_model)
+```
+For our post-hoc analysis we'll use the Hosmer-Lemeshow test (Note to self: A likelihood ratio test can also work). We see that the p-value is 0.4309 for the HL test, meaning we can fail to reject the null hypothesis. If we fail to reject the null hypothesis in a HL test, that's a good thing! The model below is a decent predictor for High Cholesterol.
+```{r, echo=FALSE}
+model_data<-model.frame(stepwise_model)
+predicted_probs <- predict(stepwise_model, type = "response")
+y_obs <- model_data$High_Chol
+hl_test <- hoslem.test(y_obs, predicted_probs, g = 10)
+hl_test
+
+stepwise_model
+```
